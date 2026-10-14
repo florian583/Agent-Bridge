@@ -14,6 +14,7 @@ from typing import Any, Literal
 
 import psutil
 
+from agent_bridge.activity import task_activity
 from agent_bridge.adapters import build_adapter
 from agent_bridge.adapters.acp import AcpError
 from agent_bridge.adapters.base import Adapter
@@ -63,6 +64,7 @@ from agent_bridge.transcript import (
     worker_silence_sec,
 )
 from agent_bridge.worker_env import build_worker_env, describe_env, install_host_env, is_worker_context
+from agent_bridge.worker_instructions import worker_message
 from agent_bridge.workspace import merge_files_changed, snapshot_workspace
 
 log = logging.getLogger(__name__)
@@ -189,6 +191,7 @@ class Registry:
         self._flushed_gen = 0
         self._state_error: Exception | None = None
         self._state_quarantined = False
+        self.require_durable_dispatch = False
 
     @classmethod
     def create(
@@ -697,6 +700,7 @@ class Registry:
         title: str | None = None,
         user_requested: bool = False,
         request_id: str | None = None,
+        conversation_id: str | None = None,
     ) -> dict:
         if not self.dispatch_enabled:
             raise RuntimeError(NESTED_DISPATCH_ERROR)
@@ -720,6 +724,10 @@ class Registry:
             raise ValueError(f"cwd is not a directory: {cwd_path}")
         effort = normalize_effort(effort)
         self.config.get(agent)
+        effective_message = worker_message(self.home, message)
+        caller_request_id = request_id
+        if request_id and conversation_id:
+            request_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{conversation_id}:{request_id}"))
         # Compare supplied arguments, not selections inherited from a mutable session.
         request = (agent, message, str(cwd_path.resolve()), session_id, model, effort, title, user_requested)
         async with self._lock:
@@ -734,7 +742,7 @@ class Registry:
                     "agent": task.agent,
                     "model": task.model,
                     "effort": task.effort,
-                    "request_id": request_id,
+                    "request_id": caller_request_id,
                     "reused": True,
                     "persisted": await self.flush_state(),
                 }
@@ -742,6 +750,8 @@ class Registry:
                 session = self.sessions.get(session_id)
                 if session is None:
                     raise KeyError(f"unknown session {session_id}")
+                if session.conversation_id != conversation_id:
+                    raise PermissionError("session belongs to another conversation")
                 if session.agent != agent:
                     raise ValueError(f"session {session_id} belongs to agent {session.agent}, not {agent}")
                 if Path(session.cwd).resolve() != cwd_path.resolve():
@@ -757,6 +767,7 @@ class Registry:
             else:
                 session = Session(
                     session_id=_new_id("sess"),
+                    conversation_id=conversation_id,
                     agent=agent,
                     cwd=str(cwd_path.resolve()),
                     model=model,
@@ -777,9 +788,10 @@ class Registry:
             session.last_active_at = iso()
             task = Task(
                 task_id=_new_id("task"),
+                conversation_id=conversation_id,
                 session_id=session.session_id,
                 agent=agent,
-                message=message,
+                message=effective_message,
                 cwd=session.cwd,
                 model=model or session.model,
                 effort=effort or session.effort,
@@ -803,13 +815,23 @@ class Registry:
                 session.session_id,
                 agent,
             )
-            try:
+            if self.require_durable_dispatch:
                 persisted = await self.flush_state()
-            finally:
-                # Even when the caller cancels mid-flush, the registered task
-                # must still start — a request_id retry would otherwise reuse
-                # a row that never runs.
+                if not persisted:
+                    task.status = TaskStatus.failed
+                    task.error = "dispatch_not_started: durable storage unavailable"
+                    task.stop_reason = "persistence_failed"
+                    task.finished_at = iso()
+                    self._done[task.task_id].set()
+                    session.proc_state = ProcState.idle_unloaded
+                    self.save()
+                    raise RuntimeError(task.error)
                 self._bg[task.task_id] = asyncio.create_task(self._run_task(task.task_id), name=f"task-{task.task_id}")
+            else:
+                try:
+                    persisted = await self.flush_state()
+                finally:
+                    self._bg[task.task_id] = asyncio.create_task(self._run_task(task.task_id), name=f"task-{task.task_id}")
         return {
             "task_id": task.task_id,
             "session_id": session.session_id,
@@ -817,7 +839,7 @@ class Registry:
             "model": session.model,
             "effort": session.effort,
             "persisted": persisted,
-            **({"request_id": request_id, "reused": False} if request_id is not None else {}),
+            **({"request_id": caller_request_id, "reused": False} if request_id is not None else {}),
         }
 
     async def _run_task(self, task_id: str) -> None:
@@ -924,6 +946,10 @@ class Registry:
                     task.failure = exc.failure if isinstance(exc, AcpError) else None
                     task.stop_reason = "error"
         finally:
+            try:
+                await self.refresh_usage(task, session)
+            except Exception:
+                log.exception("usage_refresh_failed task_id=%s", task_id)
             self._cancel_requested.discard(task_id)
             if watch is not None:
                 watch.cancel()
@@ -979,6 +1005,9 @@ class Registry:
                 (task.error or "")[:500],
             )
             self._schedule_idle(session.session_id)
+
+    async def refresh_usage(self, task: Task, session: Session) -> None:
+        """Optional runtime telemetry; standalone adapters retain their native usage."""
 
     @staticmethod
     def _set_files_changed(task: Task, paths: list[str], outside: list[str] | None = None) -> None:
@@ -1335,6 +1364,7 @@ class Registry:
             "started_at": task.started_at,
             "finished_at": task.finished_at,
             "recent_activity": recent_activity(events),
+            "usage": task.usage,
         }
         if task.task_id not in self.tasks:
             # Read via the disk fallback: values are the other instance's
@@ -1413,6 +1443,21 @@ class Registry:
     async def check_task(self, task_id: str) -> dict:
         task = self._require_task(task_id, allow_disk=True)
         return await self._with_persisted(task, self._task_snapshot(task))
+
+    async def inspect_task(self, task_id: str, cursor: str | None = None, limit: int = 12) -> dict:
+        task = self._require_task(task_id, allow_disk=True)
+        snapshot = self._task_snapshot(task)
+        snapshot.pop("recent_activity", None)
+        silence = snapshot.get("silent_for_sec")
+        signal = "terminal" if task.status in TERMINAL_STATUSES else "queued"
+        if task.status == TaskStatus.running:
+            observed_silence = worker_silence_sec(task.session_id, self.home)
+            signal = "no_output_yet" if observed_silence is None else "quiet" if silence is not None and silence >= 60 else "active"
+        activity = await asyncio.to_thread(task_activity, task, self.home, cursor, limit)
+        return {**snapshot, **activity, "activity_signal": signal,
+                "hint": "Read-only snapshot; silence is not proof of a stuck worker. Cursor returns only newer visible events. "
+                        "No workspace scan. File-change totals may remain pending until completion. "
+                        "Output is bounded/redacted; provider may omit successful tool output. Poll on demand, normally 15-30s, not in a tight loop."}
 
     async def get_result(
         self,

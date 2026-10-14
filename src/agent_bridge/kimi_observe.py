@@ -6,10 +6,11 @@ only special-cases auth codes and ``provider.filtered``). Over ACP a quota or
 provider error is therefore indistinguishable from a clean no-op, which would
 let a coordinator accept an empty diff as success.
 
-The session's ``wire.jsonl`` records the truth: a terminal ``turn.ended`` with
-its reason and error, plus the ``llm.request`` naming the model and thinking
-effort the turn really ran with. This is Kimi's analogue of the Grok
-``events.jsonl`` read in ``grok_observe``.
+The session's ``wire.jsonl`` records the truth. Current Kimi native logs emit
+``agent.turn.ended`` with ``outcome`` / ``errorMessage``; legacy logs emit
+``turn.ended`` with ``reason`` / ``error``. ``llm.request`` names the model
+and thinking effort the turn really ran with. This is Kimi's analogue of the
+Grok ``events.jsonl`` read in ``grok_observe``.
 """
 
 from __future__ import annotations
@@ -24,13 +25,13 @@ log = logging.getLogger(__name__)
 
 # wire.jsonl inlines system-prompt and tool snapshots, so it passes a few
 # hundred KB after one trivial turn and single lines run to tens of KB. Only
-# the tail matters: the last llm.request and the terminal turn.ended.
+# the tail matters: the last llm.request and the current turn's terminal event.
 TAIL_BYTES = 1024 * 1024
 
-# Kimi ends a turn with completed | cancelled | failed | blocked. Only the last
-# two are faults: `cancelled` is how Bridge's own cancel_task lands here, and
-# reporting it as a failure would contradict the task's cancelled status.
-TURN_REASONS_OK = frozenset({"completed", "cancelled"})
+# Legacy: completed | cancelled | failed | blocked. Current: done | aborted |
+# failed. Only failed/blocked (and any other non-OK status) are faults.
+# cancelled/aborted is how Bridge's own cancel_task lands here.
+TURN_REASONS_OK = frozenset({"completed", "cancelled", "done", "aborted"})
 
 
 def kimi_home(explicit: Path | None = None) -> Path:
@@ -77,7 +78,7 @@ def observe_kimi_session(
     if not records:
         return blank
     model, effort = _last_request(records)
-    return {"model": model, "effort": effort, "failure": _last_failure(records)}
+    return {"model": model, "effort": effort, "failure": _current_turn_failure(records)}
 
 
 def _tail_records(path: Path) -> list[dict[str, Any]]:
@@ -125,20 +126,57 @@ def _last_request(records: list[dict[str, Any]]) -> tuple[str | None, str | None
     return model, effort
 
 
-def _last_failure(records: list[dict[str, Any]]) -> str | None:
-    reason: Any = None
-    error: Any = None
-    for record in records:
-        if record.get("type") != "turn.ended":
-            continue
-        reason = record.get("reason")
-        error = record.get("error")
-    if not isinstance(reason, str) or reason in TURN_REASONS_OK:
+def _is_turn_started(type_name: Any) -> bool:
+    return isinstance(type_name, str) and (
+        type_name == "turn.started" or type_name.endswith(".turn.started")
+    )
+
+
+def _is_turn_ended(type_name: Any) -> bool:
+    return isinstance(type_name, str) and (
+        type_name == "turn.ended" or type_name.endswith(".turn.ended")
+    )
+
+
+def _end_status(record: dict[str, Any]) -> tuple[str | None, Any]:
+    outcome = record.get("outcome")
+    if isinstance(outcome, str) and outcome:
+        return outcome, record.get("errorMessage")
+    reason = record.get("reason")
+    if isinstance(reason, str) and reason:
+        return reason, record.get("error")
+    return None, None
+
+
+def _format_failure(status: str, error: Any) -> str | None:
+    if status in TURN_REASONS_OK:
         return None
-    parts = [reason]
-    if isinstance(error, dict):
+    parts = [status]
+    if isinstance(error, str) and error:
+        parts.append(error)
+    elif isinstance(error, dict):
         for key in ("code", "message"):
             value = error.get(key)
             if isinstance(value, str) and value:
                 parts.append(value)
     return ": ".join(parts)
+
+
+def _current_turn_failure(records: list[dict[str, Any]]) -> str | None:
+    """Failure for the current turn only.
+
+    A later ``turn.started`` / ``agent.turn.started`` clears an earlier
+    ending so an old fault is never attributed to a turn still in flight
+    or to a current turn whose ending we have not read.
+    """
+    failure: str | None = None
+    for record in records:
+        type_name = record.get("type")
+        if _is_turn_started(type_name):
+            failure = None
+            continue
+        if not _is_turn_ended(type_name):
+            continue
+        status, error = _end_status(record)
+        failure = _format_failure(status, error) if isinstance(status, str) else None
+    return failure

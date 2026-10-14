@@ -51,6 +51,7 @@ from agent_bridge.processes import (
     resolve_command,
 )
 from agent_bridge.transcript import append_event
+from agent_bridge.usage import consumed_token_usage, select_turn_usage
 from agent_bridge.worker_env import build_worker_env, denied_by_policy
 from agent_bridge.workspace import collect_update_paths
 from agent_bridge.zcode_meta import (
@@ -578,12 +579,18 @@ class _BridgeClient:
             event_type = "plan"
         elif type_name == "UsageUpdate":
             event_type = "raw"
-            self.usage = dumped if isinstance(dumped, dict) else {"raw": dumped}
+            occupancy = dumped if isinstance(dumped, dict) else {"raw": dumped}
+            token_usage = consumed_token_usage(occupancy)
+            if token_usage is not None:
+                self.usage = token_usage
         if should_collect_tool_paths(type_name, dumped, self.tool_kinds):
             _collect_paths(dumped, self.files)
         data: dict[str, Any] = {"update_type": type_name}
         if text:
             data["text"] = text
+        if type_name == "UsageUpdate" and isinstance(dumped, dict):
+            data.update(dumped)
+            data["update_type"] = type_name
         if isinstance(dumped, dict):
             title = dumped.get("title")
             if title:
@@ -603,10 +610,10 @@ class _BridgeClient:
                 summary = _tool_io_summary(dumped.get("rawInput"))
                 if summary is not None:
                     data["input"] = summary
-            elif dumped.get("status") == "failed":
+            else:
                 summary = _tool_io_summary(dumped.get("rawOutput"))
                 if summary is not None:
-                    data["output"] = summary
+                    data["output"] = _redact_diagnostic(summary)[:1200]
         append_event(self.session_id, event_type, data, self.home)
 
     async def write_text_file(self, session_id: str, path: str, content: str, **kwargs: Any) -> NoReturn:
@@ -1742,6 +1749,7 @@ class AcpAdapter(Adapter):
                 text="".join(live.client.text_parts),
                 files_changed=sorted(live.client.files),
                 stop_reason="cancelled",
+                usage=select_turn_usage(live.client.usage),
                 warnings=warnings,
                 observed_model=live.applied_model,
                 observed_effort=live.applied_effort,
@@ -1758,11 +1766,7 @@ class AcpAdapter(Adapter):
         if hasattr(stop, "value"):
             stop = stop.value
         stop = str(stop)
-        usage = live.client.usage
-        if not usage:
-            dumped_usage = _dump(getattr(response, "usage", None))
-            if isinstance(dumped_usage, dict):
-                usage = dumped_usage
+        usage = select_turn_usage(_dump(getattr(response, "usage", None)), live.client.usage)
         append_event(session.session_id, "turn_end", {"stop_reason": stop}, self.home)
         return TurnResult(
             text="".join(live.client.text_parts),

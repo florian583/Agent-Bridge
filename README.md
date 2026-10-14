@@ -15,6 +15,8 @@
 
 Agent Bridge is a connector for local coding agents. A coordinator — Codex, Cursor, Kimi Code, ZCode, Grok Build, Claude Code, or Devin — directs Antigravity CLI, Grok Build, Kimi Code, DeepSeek Harness, OpenCode, Claude Code, Codex CLI, Devin CLI, ZCode, and MiniMax Code. The same product can be a coordinator and a worker; those are different processes. More agents will follow.
 
+For long-running work, the optional [shared daemon](DAEMON.md) keeps worker sessions alive across coordinator restarts. It adds durable task state, conversation-scoped reconnect, progress inspection, and per-worker usage tracking. Standalone MCP mode remains supported.
+
 ```text
 User → Coordinator (Codex / Cursor / Kimi Code / ZCode / Grok Build / Claude Code / Devin)
      → Agent Bridge (MCP) → Antigravity CLI

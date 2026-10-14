@@ -225,4 +225,4 @@ async def test_tool_call_events_record_kind_status_and_input(tmp_path):
     completed = read_events("sess_tool", tmp_path)[-1]
     assert completed["type"] == "tool_call_update"
     assert completed["data"]["status"] == "completed"
-    assert "output" not in completed["data"]
+    assert completed["data"]["output"] == "done"

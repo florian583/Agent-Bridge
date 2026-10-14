@@ -91,6 +91,7 @@ def grok_effort(effort: str | None) -> str | None:
 
 class Session(BaseModel):
     session_id: str
+    conversation_id: str | None = None
     agent: str
     cwd: str
     native_session_id: str | None = None
@@ -118,6 +119,7 @@ class TaskFailure(BaseModel):
 
 class Task(BaseModel):
     task_id: str
+    conversation_id: str | None = None
     session_id: str
     agent: str
     message: str
