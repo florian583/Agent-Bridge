@@ -116,6 +116,9 @@ class AgentConfig(BaseModel):
     revivable: bool = False
     idle_unload_sec: int = 0
     stall_timeout_sec: int = Field(default=1800, ge=0)
+    # Reject excess dispatch promptly instead of parking work silently in a
+    # provider queue. Zero keeps existing unbounded behavior.
+    max_concurrent_tasks: int = Field(default=0, ge=0)
     # Hard cap on one turn's wall-clock length (0 = disabled). Catches a
     # worker that stays chatty forever without ever going silent —
     # stall_timeout_sec alone cannot see that case (H-16).

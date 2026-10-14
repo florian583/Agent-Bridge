@@ -4,12 +4,43 @@ from pathlib import Path
 import pytest
 
 from agent_bridge.workspace import (
+    WorkspaceScanLimit,
     _root_prefix_len,
     collect_update_paths,
+    is_worktree_collection,
     merge_files_changed,
     normalize_changed_paths,
     snapshot_workspace,
 )
+
+
+def test_worktree_collection_detected_without_scanning_children(tmp_path: Path):
+    for name in ("lane-a", "lane-b"):
+        lane = tmp_path / name
+        lane.mkdir()
+        (lane / ".git").write_text("gitdir: /tmp/example\n")
+    assert is_worktree_collection(tmp_path)
+    assert not is_worktree_collection(tmp_path / "lane-a")
+
+
+def test_single_worktree_collection_and_named_parent_are_rejected(tmp_path: Path):
+    parent = tmp_path / "one-lane"
+    parent.mkdir()
+    lane = parent / "lane-a"
+    lane.mkdir()
+    (lane / ".git").write_text("gitdir: /tmp/example\n")
+    assert is_worktree_collection(parent)
+    named = tmp_path / "worktrees"
+    named.mkdir()
+    assert is_worktree_collection(named)
+
+
+def test_snapshot_limit_falls_back_to_reported_paths(tmp_path: Path):
+    for n in range(3):
+        (tmp_path / f"{n}.txt").write_text("x")
+    with pytest.raises(WorkspaceScanLimit):
+        snapshot_workspace(tmp_path, max_entries=2)
+    assert merge_files_changed(tmp_path, ["0.txt"], None) == (["0.txt"], [])
 
 
 def test_snapshot_sees_new_file_and_ignores_sessions(tmp_path: Path):

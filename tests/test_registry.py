@@ -35,6 +35,7 @@ from agent_bridge.registry import (
     Registry,
 )
 from agent_bridge.transcript import append_event, read_events
+from agent_bridge.workspace import WorkspaceScanLimit
 
 
 @pytest.mark.asyncio
@@ -58,6 +59,52 @@ async def test_dispatch_records_model_and_effort(bridge_home, tmp_path):
         assert session.effort == "low"
         with pytest.raises(ValueError, match="effort"):
             await registry.dispatch_task("fake", "bad", cwd=str(work.resolve()), effort="turbo")
+    finally:
+        await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_rejects_known_exhausted_quota_but_allows_unknown(bridge_home, tmp_path, monkeypatch):
+    work = tmp_path / "work"
+    work.mkdir()
+    registry = Registry.create(bridge_home)
+
+    async def exhausted(*_args, **_kwargs):
+        return {"status": "exhausted", "stale": False, "windows": [{"resets_at": "2099-01-01T00:00:00Z"}]}
+
+    monkeypatch.setattr(registry, "_quota_for", exhausted)
+    with pytest.raises(RuntimeError, match=r"rate_limited.*2099"):
+        await registry.dispatch_task("fake", "task", cwd=str(work))
+    assert not registry.tasks
+
+    async def unknown(*_args, **_kwargs):
+        return {"status": "unknown"}
+
+    monkeypatch.setattr(registry, "_quota_for", unknown)
+    await registry.start()
+    try:
+        result = await registry.dispatch_task("fake", "task", cwd=str(work))
+        assert result["task_id"] in registry.tasks
+    finally:
+        await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_capacity_rejects_new_task_but_reuses_request(bridge_home, tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_BRIDGE_FAKE_DELAY", "2")
+    work = tmp_path / "work"
+    work.mkdir()
+    registry = Registry.create(bridge_home)
+    registry.config.get("fake").max_concurrent_tasks = 1
+    await registry.start()
+    try:
+        request_id = str(uuid.uuid4())
+        first = await registry.dispatch_task("fake", "slow", cwd=str(work), request_id=request_id)
+        repeated = await registry.dispatch_task("fake", "slow", cwd=str(work), request_id=request_id)
+        assert repeated["task_id"] == first["task_id"] and repeated["reused"]
+        with pytest.raises(RuntimeError, match="at_capacity: 1/1"):
+            await registry.dispatch_task("fake", "another", cwd=str(work))
+        await registry.cancel_task(first["task_id"])
     finally:
         await registry.stop()
 
@@ -1736,6 +1783,61 @@ async def test_files_changed_uncapped_when_under_limit(bridge_home, tmp_path):
         waited = await registry.wait_task(dispatched["task_id"], timeout_sec=5)
         assert waited["files_changed_truncated"] is False
         assert waited["files_changed_total"] == len(waited["files_changed"])
+    finally:
+        await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_initial_scan_limit_preserves_warning_and_marks_files_incomplete(
+    bridge_home, tmp_path, monkeypatch
+):
+    work = tmp_path / "work"
+    work.mkdir()
+
+    def limited(_cwd):
+        raise WorkspaceScanLimit("synthetic initial limit")
+
+    async def reported_turn(self, session, task):
+        return TurnResult(text="done", files_changed=["reported.txt"], warnings=["worker note"])
+
+    monkeypatch.setattr("agent_bridge.registry.snapshot_workspace", limited)
+    monkeypatch.setattr(FakeAdapter, "run_turn", reported_turn)
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    try:
+        dispatched = await registry.dispatch_task("fake", "work", cwd=str(work.resolve()))
+        finished = await registry.wait_task(dispatched["task_id"], timeout_sec=5)
+        assert finished["status"] == "completed"
+        assert finished["files_changed"] == ["reported.txt"]
+        assert finished["files_changed_state"] == "unavailable"
+        assert any("synthetic initial limit" in warning for warning in finished["warnings"])
+        assert "worker note" in finished["warnings"]
+    finally:
+        await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_final_scan_limit_marks_reported_paths_incomplete(bridge_home, tmp_path, monkeypatch):
+    work = tmp_path / "work"
+    work.mkdir()
+
+    def limited(_cwd, _reported, _before):
+        raise WorkspaceScanLimit("synthetic final limit")
+
+    async def reported_turn(self, session, task):
+        return TurnResult(text="done", files_changed=["reported.txt"])
+
+    monkeypatch.setattr("agent_bridge.registry.merge_files_changed", limited)
+    monkeypatch.setattr(FakeAdapter, "run_turn", reported_turn)
+    registry = Registry.create(bridge_home)
+    await registry.start()
+    try:
+        dispatched = await registry.dispatch_task("fake", "work", cwd=str(work.resolve()))
+        finished = await registry.wait_task(dispatched["task_id"], timeout_sec=5)
+        assert finished["status"] == "completed"
+        assert finished["files_changed"] == ["reported.txt"]
+        assert finished["files_changed_state"] == "unavailable"
+        assert any("synthetic final limit" in warning for warning in finished["warnings"])
     finally:
         await registry.stop()
 

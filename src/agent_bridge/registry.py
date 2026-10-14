@@ -65,7 +65,13 @@ from agent_bridge.transcript import (
 )
 from agent_bridge.worker_env import build_worker_env, describe_env, install_host_env, is_worker_context
 from agent_bridge.worker_instructions import worker_message
-from agent_bridge.workspace import merge_files_changed, snapshot_workspace
+from agent_bridge.workspace import (
+    WorkspaceScanLimit,
+    classify_changed_paths,
+    is_worktree_collection,
+    merge_files_changed,
+    snapshot_workspace,
+)
 
 log = logging.getLogger(__name__)
 
@@ -722,8 +728,13 @@ class Registry:
             raise ValueError(f"cwd does not exist: {cwd_path}")
         if not cwd_path.is_dir():
             raise ValueError(f"cwd is not a directory: {cwd_path}")
+        if is_worktree_collection(cwd_path):
+            raise ValueError(
+                f"cwd is a worktree collection, not a checkout: {cwd_path}; "
+                "dispatch from the exact lane worktree"
+            )
         effort = normalize_effort(effort)
-        self.config.get(agent)
+        agent_config = self.config.get(agent)
         effective_message = worker_message(self.home, message)
         caller_request_id = request_id
         if request_id and conversation_id:
@@ -746,6 +757,21 @@ class Registry:
                     "reused": True,
                     "persisted": await self.flush_state(),
                 }
+            # Probe only after the idempotency lookup. The lock preserves
+            # first-caller ordering for concurrent retries.
+            quota = await self._quota_for(agent_config, available=True)
+            if quota.get("status") == "exhausted" and not quota.get("stale"):
+                resets = [w.get("resets_at") for w in quota.get("windows", []) if w.get("resets_at")]
+                retry = f"; next reset {min(resets)}" if resets else ""
+                raise RuntimeError(f"agent {agent} rate_limited: quota exhausted{retry}")
+            cap = agent_config.max_concurrent_tasks
+            if cap:
+                live = sum(
+                    task.agent == agent and task.status in {TaskStatus.queued, TaskStatus.running}
+                    for task in self.tasks.values()
+                )
+                if live >= cap:
+                    raise RuntimeError(f"agent {agent} at_capacity: {live}/{cap} tasks; retry after one finishes")
             if session_id:
                 session = self.sessions.get(session_id)
                 if session is None:
@@ -847,16 +873,21 @@ class Registry:
         task = self.tasks[task_id]
         session = self.sessions[task.session_id]
         adapter = self._adapter_for(session)
-        task.status = TaskStatus.running
-        task.started_at = iso()
-        session.proc_state = ProcState.busy
-        session.last_active_at = iso()
-        self.save()
         watch = None
         before: dict[str, tuple[int, int]] | None = None
         try:
             mark_worker_activity(session.session_id, self.home)
-            before = await asyncio.to_thread(snapshot_workspace, task.cwd)
+            try:
+                before = await asyncio.wait_for(
+                    asyncio.to_thread(snapshot_workspace, task.cwd), timeout=7.0
+                )
+            except (WorkspaceScanLimit, TimeoutError) as exc:
+                task.warnings.append(f"filesystem change tracking limited: {exc}")
+            task.status = TaskStatus.running
+            task.started_at = iso()
+            session.proc_state = ProcState.busy
+            session.last_active_at = iso()
+            self.save()
             agent_cfg = self.config.get(session.agent)
             limit = agent_cfg.stall_timeout_sec
             turn_cap = agent_cfg.turn_timeout_sec
@@ -874,7 +905,7 @@ class Registry:
             task.result_chars = len(result.text)
             # Worker-derived text crosses the trust boundary here: scrub
             # before it lands in state.json/transcripts/MCP replies.
-            task.warnings = [redact_diagnostic(w) for w in result.warnings]
+            task.warnings.extend(redact_diagnostic(w) for w in result.warnings)
             try:
                 atomic_write_text(result_path(task.task_id, self.home), result.text)
                 task.result_text = _tail(result.text)
@@ -884,10 +915,17 @@ class Registry:
                     f"full result persistence failed: {type(exc).__name__}: {exc}"
                 )
                 log.exception("could not persist full result for task %s", task.task_id)
-            inside_changed, outside_changed = await asyncio.to_thread(
-                merge_files_changed, task.cwd, result.files_changed, before
-            )
-            self._set_files_changed(task, inside_changed, outside_changed)
+            try:
+                inside_changed, outside_changed = await asyncio.wait_for(
+                    asyncio.to_thread(merge_files_changed, task.cwd, result.files_changed, before),
+                    timeout=7.0,
+                )
+            except (WorkspaceScanLimit, TimeoutError) as exc:
+                inside_changed, outside_changed = classify_changed_paths(task.cwd, result.files_changed)
+                task.warnings.append(f"filesystem change tracking limited: {exc}")
+                self._set_files_changed(task, inside_changed, outside_changed, complete=False)
+            else:
+                self._set_files_changed(task, inside_changed, outside_changed, complete=before is not None)
             task.usage = result.usage
             if session.agent == "grok":
                 observed = await asyncio.to_thread(observe_grok_session, session.cwd, session.native_session_id)
@@ -1010,14 +1048,16 @@ class Registry:
         """Optional runtime telemetry; standalone adapters retain their native usage."""
 
     @staticmethod
-    def _set_files_changed(task: Task, paths: list[str], outside: list[str] | None = None) -> None:
+    def _set_files_changed(
+        task: Task, paths: list[str], outside: list[str] | None = None, *, complete: bool = True
+    ) -> None:
         task.files_changed_total = len(paths)
         task.files_changed = paths[:FILES_CHANGED_MAX]
         task.files_changed_truncated = len(paths) > FILES_CHANGED_MAX
         outside = outside or []
         task.files_outside_cwd_total = len(outside)
         task.files_outside_cwd = outside[:FILES_CHANGED_MAX]
-        task.files_changed_state = FilesChangedState.collected
+        task.files_changed_state = FilesChangedState.collected if complete else FilesChangedState.unavailable
 
     async def _stall_watch(
         self,

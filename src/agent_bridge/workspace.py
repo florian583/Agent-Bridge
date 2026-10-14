@@ -7,6 +7,7 @@ tool_call updates. Protocol scraping alone then reports files_changed=[].
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 
 SKIP_DIR_NAMES = {
@@ -54,7 +55,31 @@ _PATH_KEYS = (
 )
 
 
-def snapshot_workspace(cwd: str | Path) -> dict[str, tuple[int, int]]:
+class WorkspaceScanLimit(Exception):
+    """Workspace too large for turn-scoped filesystem change tracking."""
+
+
+def is_worktree_collection(cwd: str | Path) -> bool:
+    """Reject a worktree parent passed in place of one concrete checkout."""
+    root = Path(cwd)
+    if (root / ".git").exists():
+        return False
+    if root.name in {"worktrees", "workspaces"}:
+        return True
+    try:
+        with os.scandir(root) as entries:
+            return any(
+                entry.is_dir(follow_symlinks=False)
+                and os.path.lexists(os.path.join(entry.path, ".git"))
+                for entry in entries
+            )
+    except OSError:
+        return False
+
+
+def snapshot_workspace(
+    cwd: str | Path, *, max_entries: int = 50_000, max_seconds: float = 5.0
+) -> dict[str, tuple[int, int]]:
     """Map posix-relative paths to (mtime_ns, size). Skip SKIP_DIR_NAMES at
     any depth. Symlink files are not followed and are omitted.
     """
@@ -62,6 +87,8 @@ def snapshot_workspace(cwd: str | Path) -> dict[str, tuple[int, int]]:
     if not root.is_dir():
         return {}
     found: dict[str, tuple[int, int]] = {}
+    deadline = time.monotonic() + max_seconds
+    entries_seen = 0
     stack = [str(root)]
     prefix_len = _root_prefix_len(str(root))
     while stack:
@@ -69,6 +96,9 @@ def snapshot_workspace(cwd: str | Path) -> dict[str, tuple[int, int]]:
         try:
             with os.scandir(current) as it:
                 for entry in it:
+                    entries_seen += 1
+                    if entries_seen > max_entries or time.monotonic() > deadline:
+                        raise WorkspaceScanLimit(f"workspace scan exceeded {max_entries} entries or {max_seconds}s")
                     try:
                         if entry.is_dir(follow_symlinks=False):
                             # Junctions/mounts pass is_dir(follow_symlinks=False)
@@ -147,10 +177,12 @@ def classify_changed_paths(
 def merge_files_changed(
     cwd: str | Path,
     reported: list[str],
-    before: dict[str, tuple[int, int]],
+    before: dict[str, tuple[int, int]] | None,
 ) -> tuple[list[str], list[str]]:
     """(inside-cwd rel paths, outside-cwd abs paths)."""
     inside, outside = classify_changed_paths(cwd, reported)
+    if before is None:
+        return inside, outside
     disk = changed_since(cwd, before)
     merged = inside + [rel for rel in disk if rel not in set(inside)]
     return merged, outside

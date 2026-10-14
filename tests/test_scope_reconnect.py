@@ -36,7 +36,7 @@ class ScopeReconnectTest(unittest.TestCase):
 
         with (
             tempfile.TemporaryDirectory() as directory,
-            patch.dict(os.environ, {"AGENT_BRIDGE_BINDINGS": directory}),
+            patch.dict(os.environ, {"AGENT_BRIDGE_BINDINGS": directory, "AGENT_BRIDGE_CONVERSATION_ID": "", "CODEX_THREAD_ID": ""}),
             patch("agent_bridge.daemon.is_host_process", side_effect=lambda p: p.pid == os.getpid()),
         ):
             asyncio.run(scenario(Path(directory)))

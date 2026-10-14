@@ -41,6 +41,17 @@ def dispatch_args(tmp_path):
     return dict(agent="fake", message="test", cwd=str(tmp_path), request_id=str(uuid.uuid4()))
 
 
+async def test_dispatch_rejects_worktree_collection_before_task_creation(daemon, tmp_path):
+    for name in ("lane-a", "lane-b"):
+        lane = tmp_path / name
+        lane.mkdir()
+        (lane / ".git").write_text("gitdir: /tmp/example\n")
+    client = DaemonClient(daemon.socket, "well")
+    with pytest.raises(RuntimeError, match="exact lane worktree"):
+        await client.call("dispatch_task", **dispatch_args(tmp_path))
+    assert not daemon.registry.tasks
+
+
 async def test_scoped_clients_and_reconnect(daemon, tmp_path, monkeypatch):
     monkeypatch.setenv("AGENT_BRIDGE_FAKE_DELAY", "0.3")
     a, b = DaemonClient(daemon.socket, "well"), DaemonClient(daemon.socket, "peetchr")
