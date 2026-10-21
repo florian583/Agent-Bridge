@@ -20,3 +20,5 @@ design/
 AGENTS.md
 # Live coordinator workspace. Recreate locally with scripts/setup_lab.py.
 lab/
+
+relay/target/
