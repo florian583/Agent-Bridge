@@ -1,0 +1,62 @@
+{
+  "samplesPerImplementation": 3,
+  "idleSeconds": 5.001,
+  "summaryMedian": {
+    "rust": {
+      "initializeMS": 3.601,
+      "rssMiB": 2.188,
+      "footprintMiB": 1.453,
+      "idleCpuPct": 0.0
+    },
+    "python": {
+      "initializeMS": 456.941,
+      "rssMiB": 78.844,
+      "footprintMiB": 62.219,
+      "idleCpuPct": 0.0
+    }
+  },
+  "samples": [
+    {
+      "implementation": "rust",
+      "initializeMS": 4.310207998059923,
+      "rssMiB": 2.125,
+      "footprintMiB": 1.3909225463867188,
+      "idleCpuPct": 0.0
+    },
+    {
+      "implementation": "rust",
+      "initializeMS": 3.601166001317324,
+      "rssMiB": 2.1875,
+      "footprintMiB": 1.4534225463867188,
+      "idleCpuPct": 0.0
+    },
+    {
+      "implementation": "rust",
+      "initializeMS": 3.503874999296386,
+      "rssMiB": 2.1875,
+      "footprintMiB": 1.4690704345703125,
+      "idleCpuPct": 0.0
+    },
+    {
+      "implementation": "python",
+      "initializeMS": 879.789124999661,
+      "rssMiB": 78.96875,
+      "footprintMiB": 62.32860565185547,
+      "idleCpuPct": 0.0
+    },
+    {
+      "implementation": "python",
+      "initializeMS": 456.94066699797986,
+      "rssMiB": 78.8125,
+      "footprintMiB": 62.18800354003906,
+      "idleCpuPct": 0.0
+    },
+    {
+      "implementation": "python",
+      "initializeMS": 434.529416001169,
+      "rssMiB": 78.84375,
+      "footprintMiB": 62.21925354003906,
+      "idleCpuPct": 0.0
+    }
+  ]
+}
