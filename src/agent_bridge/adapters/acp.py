@@ -30,7 +30,7 @@ from agent_bridge.claude_meta import (
     resolve_claude_effort,
 )
 from agent_bridge.config import AgentConfig
-from agent_bridge.devin_meta import DEVIN_MODE_BYPASS, apply_devin_env
+from agent_bridge.devin_meta import DEVIN_AGENT_NAMES, DEVIN_MODE_BYPASS, apply_devin_env
 from agent_bridge.diagnostics import redact_diagnostic as _redact_diagnostic
 from agent_bridge.dsh_home import command_has_native_acp, prepare_dsh_launch, resolve_dsh_command
 from agent_bridge.kimi_meta import KIMI_MODE_YOLO, resolve_kimi_thinking
@@ -71,10 +71,10 @@ GROK_SET_MODEL_METHODS = ("session/setModel", "session/set_model")
 _RESUME_AGENTS = frozenset({"kimi", "opencode", "claude", "zcode", "minimax"})
 _CONFIG_OPTION_AGENTS = frozenset(
     {"kimi", "opencode", "claude", "devin", "cursor", "dsh", "zcode", "minimax"}
-)
+) | DEVIN_AGENT_NAMES
 _MODEL_EFFORT_AGENTS = frozenset(
     {"grok", "dsh", "kimi", "opencode", "claude", "devin", "cursor", "zcode", "minimax"}
-)
+) | DEVIN_AGENT_NAMES
 
 # Handshake-style RPCs (initialize, session/new, session/load, setModel)
 # normally answer in seconds. A worker that wedges before the prompt would
@@ -714,7 +714,7 @@ class AcpAdapter(Adapter):
                 set(self.env_config.set) | set(self.agent.env),
             ):
                 env = apply_claude_gateway_env(env)
-        elif self.agent.name == "devin":
+        elif self.agent.name in DEVIN_AGENT_NAMES:
             env = apply_devin_env(env)
         # Gateway derivation above can recreate a denied key; the deny gate
         # runs on the rewritten env, not on build_worker_env's output.
@@ -1327,7 +1327,7 @@ class AcpAdapter(Adapter):
         (``swe-1-7-medium``, ``claude-opus-5-high``); there is no effort
         option, so a Bridge effort is reported as ignored once per value.
         """
-        if self.agent.name != "devin" or live.conn is None or not session.native_session_id:
+        if self.agent.name not in DEVIN_AGENT_NAMES or live.conn is None or not session.native_session_id:
             return
         await self._sync_bypass_mode(live, session, DEVIN_MODE_BYPASS)
         await self._sync_model_option(live, session)

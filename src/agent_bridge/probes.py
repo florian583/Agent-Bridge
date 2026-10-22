@@ -9,7 +9,7 @@ from pathlib import Path
 from agent_bridge.claude_meta import apply_claude_gateway_env, claude_config_home, describe_claude_auth
 from agent_bridge.codex_exec import resolve_codex_command
 from agent_bridge.config import AgentConfig, EnvConfig
-from agent_bridge.devin_meta import apply_devin_env
+from agent_bridge.devin_meta import DEVIN_AGENT_NAMES, apply_devin_env
 from agent_bridge.dsh_home import (
     apply_dsh_worker_env,
     command_has_native_acp,
@@ -220,7 +220,7 @@ async def probe_agent(cfg: AgentConfig, env_config: EnvConfig | None = None) -> 
             "(@agentclientprotocol/claude-agent-acp)"
         )
 
-    if cfg.name == "devin":
+    if cfg.name in DEVIN_AGENT_NAMES:
         resolved = apply_devin_env(resolved)
         # The rewritten env is handed to a spawned CLI; re-apply env.deny so
         # apply_devin_env cannot reintroduce a denied key.
@@ -277,6 +277,8 @@ async def probe_agent(cfg: AgentConfig, env_config: EnvConfig | None = None) -> 
         "available": True,
         "version": version or None,
         "detail": "; ".join(details),
+        **({"description": "Devin Well: another Devin Pro subscription; isolated account. Use model swe-2-high."}
+           if cfg.name == "devin-well" else {}),
     }
 
 

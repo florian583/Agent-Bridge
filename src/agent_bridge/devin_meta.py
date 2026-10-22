@@ -21,6 +21,7 @@ from collections.abc import Mapping
 
 DEVIN_MODE_BYPASS = "bypass"
 DEVIN_HOST_MARK = "ACP_BACKEND"
+DEVIN_AGENT_NAMES = frozenset({"devin", "devin-well"})
 
 
 def apply_devin_env(env: Mapping[str, str]) -> dict[str, str]:
