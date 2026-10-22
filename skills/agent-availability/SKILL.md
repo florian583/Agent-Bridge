@@ -15,3 +15,19 @@ description: Check Agent Bridge engine and model limits before dispatching work 
 Automatic provider-error cooldowns last five minutes when no reset is known. They are retry delays, not inferred subscription reset dates. A known operator limit takes precedence. If the tool returns an error, report availability as unavailable to check; do not treat a failed check as an empty block list.
 
 If the new tools are absent, reload the MCP connection after the update. Do not bypass a known block with direct worker CLIs. Keep this skill in Claude Hybrid's user-level skills directory; it is not a repository-local workflow.
+
+## Shell fallback for existing sessions
+
+Use `/Users/florianvidal/.local/bin/bridge-availability.sh` when MCP tools are not yet visible. It reads and writes the same daemon state immediately. No new Claude session is required.
+
+```sh
+bridge-availability.sh list
+bridge-availability.sh priorities
+bridge-availability.sh models
+bridge-availability.sh check --agent kimi --model kimi-code/kimi-for-coding
+bridge-availability.sh report --agent kimi --reason monthly_limit --until '2026-11-08T00:28:00+08:00'
+bridge-availability.sh report --agent devin --model swe-2-high --reason rate_limit --until unknown
+bridge-availability.sh clear --agent devin --model swe-2-high
+```
+
+Examples of report and clear are mutations; run them only for an observed limit or verified recovery. Omit `--model` for an account-wide limit. `models` returns configured engine inventory, provider model-selection guidance, availability, and retained model limits; it is not an exhaustive provider model catalogue. `priorities` returns the actual coordinator instructions. Apply those instructions with the availability filter above; the script does not invent a ranking. Errors exit nonzero and never mean all engines are available. Nested workers can read but cannot report or clear limits.

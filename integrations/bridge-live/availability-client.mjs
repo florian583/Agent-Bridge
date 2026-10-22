@@ -2,7 +2,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 
-const methods = new Set(['check_availability', 'report_usage_limit', 'clear_usage_limit']);
+const methods = new Set(['check_availability', 'report_usage_limit', 'clear_usage_limit', 'list_agents']);
 const str = {type:'string'};
 const shape = (properties, required=[]) => ({type:'object',properties,required,additionalProperties:false});
 export const availabilityTools = [
@@ -14,7 +14,7 @@ export const availabilityTools = [
 export function availabilityCall(method, params, conversation, options={}) {
   if (!methods.has(method)) return Promise.reject(new Error('Unsupported availability method'));
   const nested = process.env.AGENT_BRIDGE_PARENT_CONTEXT === 'worker';
-  if (nested && method !== 'check_availability') return Promise.reject(new Error('Nested worker mutation disabled'));
+  if (nested && !['check_availability', 'list_agents'].includes(method)) return Promise.reject(new Error('Nested worker mutation disabled'));
   const socketPath = options.socket || process.env.AGENT_BRIDGE_DAEMON_SOCKET || path.join(os.homedir(),'.agent-bridge-daemon/daemon.sock');
   const payload = JSON.stringify({method,params,conversation_id:conversation,client_pid:process.pid,runtime_context:nested?'worker':'coordinator'})+'\n';
   if (Buffer.byteLength(payload)>65536) return Promise.reject(new Error('Availability request too large'));

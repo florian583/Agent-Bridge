@@ -16,3 +16,12 @@ if "from './availability-client.mjs'" not in source:
     relay.write_text(source)
 shutil.copy2(Path(__file__).with_name('availability-client.mjs'), root / 'availability-client.mjs')
 print('Bridge Live availability tools installed; existing connections load them on reconnect')
+
+for name in ('bridge-availability.mjs',):
+    shutil.copy2(Path(__file__).with_name(name), root / name)
+bin_dir = Path.home() / '.local/bin'
+bin_dir.mkdir(parents=True, exist_ok=True)
+cli = bin_dir / 'bridge-availability.sh'
+shutil.copy2(Path(__file__).with_name('bridge-availability.sh'), cli)
+cli.chmod(0o755)
+print(f'Shell fallback ready now: {cli}')
