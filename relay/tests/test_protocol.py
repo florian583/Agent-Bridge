@@ -198,6 +198,9 @@ class ProtocolTests(unittest.TestCase):
         python = self.client(reference=True)
         cases = [
             ("list_agents", {}),
+            ("check_availability", {"agent": "kimi"}),
+            ("report_usage_limit", {"agent": "kimi", "reason": "monthly_limit"}),
+            ("clear_usage_limit", {"agent": "kimi"}),
             ("set_preferences", {}),
             ("dispatch_task", {"agent": "fake", "message": "hello", "cwd": "/tmp", "request_id": "request-1"}),
             ("wait_task", {"task_id": "task-1"}),

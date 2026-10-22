@@ -27,12 +27,12 @@ from agent_bridge.transcript import flush_pending
 
 log = logging.getLogger(__name__)
 METHODS = frozenset({
-    "list_agents", "env_status", "coordinator_status", "set_preferences",
+    "list_agents", "check_availability", "report_usage_limit", "clear_usage_limit", "env_status", "coordinator_status", "set_preferences",
     "dispatch_task", "wait_task", "check_task", "get_result", "get_transcript",
     "cancel_task", "list_sessions", "session_scope", "end_session", "events", "health", "inspect_task",
 })
-MUTATIONS = frozenset({"set_preferences", "dispatch_task", "cancel_task", "end_session"})
-UNSCOPED = frozenset({"health", "list_agents", "env_status", "coordinator_status"})
+MUTATIONS = frozenset({"report_usage_limit", "clear_usage_limit", "set_preferences", "dispatch_task", "cancel_task", "end_session"})
+UNSCOPED = frozenset({"check_availability", "health", "list_agents", "env_status", "coordinator_status"})
 
 
 def bound_conversation(client_pid: Any) -> str | None:
@@ -266,6 +266,10 @@ class Daemon:
         if method == "coordinator_status":
             return {**self.registry.coordinator_status(), "ownership": "shared-daemon",
                     "runtime_context": "worker" if nested else "coordinator", "dispatch_enabled": not nested}
+        if method == "check_availability":
+            result = await self.registry.check_availability(**params)
+            result["coordinator"].update(runtime_context="worker" if nested else "coordinator", dispatch_enabled=not nested)
+            return result
         if method == "list_agents":
             async with self._probe_lock:
                 if self._probe_cache is None or time.monotonic()-self._probe_cache[0] > 30:

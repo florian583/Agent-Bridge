@@ -8,7 +8,7 @@ import logging
 import os
 import time
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -18,6 +18,7 @@ from agent_bridge.activity import task_activity
 from agent_bridge.adapters import build_adapter
 from agent_bridge.adapters.acp import AcpError
 from agent_bridge.adapters.base import Adapter
+from agent_bridge.availability import UsageLimits, quota_blocked
 from agent_bridge.config import (
     COORDINATOR_MODE_HINTS,
     AgentConfig,
@@ -47,7 +48,7 @@ from agent_bridge.persist import (
     file_lock,
     read_json_strict,
 )
-from agent_bridge.probes import probe_agent
+from agent_bridge.probes import command_exists, probe_agent
 from agent_bridge.processes import count_sibling_servers, owner_alive, process_create_time, reap_orphans
 from agent_bridge.quota import QuotaCache, fetch_quota, looks_like_quota_error, provider_table, unknown_quota
 from agent_bridge.transcript import (
@@ -189,6 +190,7 @@ class Registry:
         self.dispatch_enabled = self.runtime_context == "coordinator"
         self._sibling_cache: tuple[float, int] | None = None
         self._quota_cache = QuotaCache(config.quota.cache_sec)
+        self._usage_limits = UsageLimits(home)
         self._stopping = False
         self._pending_state: dict[str, list[dict]] | None = None
         self._pending_gen = 0
@@ -606,6 +608,57 @@ class Registry:
 
         return list(await asyncio.gather(*(describe(cfg) for cfg in self.config.agents.values())))
 
+    async def retain_usage_cooldown(self, task: Task) -> None:
+        if task.status == TaskStatus.failed and looks_like_quota_error(task.error):
+            try:
+                await asyncio.to_thread(self._usage_limits.set, task.agent, None, "rate_limit",
+                    datetime.fromtimestamp(time.time() + 300, UTC).isoformat(), source="observed_error")
+            except (OSError, ValueError):
+                log.exception("could not retain usage cooldown for %s", task.agent)
+
+    async def check_availability(self, agent: str | None = None, model: str | None = None) -> dict:
+        if model is not None and agent is None:
+            raise ValueError("model requires one agent")
+        configs = [self.config.get(agent)] if agent else list(self.config.agents.values())
+
+        async def check(cfg: AgentConfig) -> dict:
+            limits = await asyncio.to_thread(self._usage_limits.active, cfg.name, model, include_models=model is None)
+            model_required = bool(model is None and limits and all(r.get("model") is not None for r in limits))
+            available = await asyncio.to_thread(command_exists, cfg)
+            quota = (unknown_quota("retained usage limit; provider lookup skipped").model_dump(mode="json")
+                     if limits else await self._quota_for(cfg, available=available))
+            live = sum(t.agent == cfg.name and t.status in {TaskStatus.queued, TaskStatus.running}
+                       for t in self.tasks.values())
+            cap = cfg.max_concurrent_tasks
+            status = ("unknown" if model_required else "blocked" if limits or quota_blocked(quota, model) else
+                      "unavailable" if not available else
+                      "busy" if cap and live >= cap else
+                      "unknown" if quota.get("status") == "unknown" or quota.get("stale") else "ready")
+            return dict(agent=cfg.name, model=model, status=status, command_available=available,
+                        active_tasks=live, max_concurrent_tasks=cap, limits=limits, quota=quota, model_required=model_required)
+
+        return dict(agents=list(await asyncio.gather(*(check(cfg) for cfg in configs))),
+                    coordinator=self.coordinator_status(),
+                    instruction="Choose among usable engines using coordinator preferences; unknown is not exhausted. Refresh after reset.")
+
+    async def report_usage_limit(self, agent: str, reason: str, resets_at: str | None = None,
+                                 model: str | None = None) -> dict:
+        if not self.dispatch_enabled:
+            raise RuntimeError(NESTED_PREFERENCES_ERROR)
+        self.config.get(agent)
+        async with self._lock:
+            limit = await asyncio.to_thread(self._usage_limits.set, agent, model, reason, resets_at)
+        return dict(limit=limit)
+
+    async def clear_usage_limit(self, agent: str, model: str | None = None) -> dict:
+        if not self.dispatch_enabled:
+            raise RuntimeError(NESTED_PREFERENCES_ERROR)
+        self.config.get(agent)
+        async with self._lock:
+            result = await asyncio.to_thread(self._usage_limits.clear, agent, model)
+            self._quota_cache.invalidate(agent)
+        return result
+
     async def _quota_for(self, cfg: AgentConfig, *, available: bool) -> dict:
         """The ``quota`` block for one ``list_agents`` row. Never raises, never gates ``available``."""
         quota_cfg = self.config.quota
@@ -759,8 +812,13 @@ class Registry:
                 }
             # Probe only after the idempotency lookup. The lock preserves
             # first-caller ordering for concurrent retries.
+            requested_model = model or (self.sessions[session_id].model if session_id in self.sessions else None)
+            limits = await asyncio.to_thread(self._usage_limits.active, agent, requested_model,
+                                             include_models=requested_model is None)
+            if limits:
+                raise RuntimeError(f"agent {agent} rate_limited: retained usage limit; inspect check_availability")
             quota = await self._quota_for(agent_config, available=True)
-            if quota.get("status") == "exhausted" and not quota.get("stale"):
+            if quota_blocked(quota, requested_model):
                 resets = [w.get("resets_at") for w in quota.get("windows", []) if w.get("resets_at")]
                 retry = f"; next reset {min(resets)}" if resets else ""
                 raise RuntimeError(f"agent {agent} rate_limited: quota exhausted{retry}")
@@ -1019,6 +1077,7 @@ class Registry:
             ):
                 # The cached "ok" is now a lie; make the next list_agents re-read it.
                 self._quota_cache.invalidate(session.agent)
+                await self.retain_usage_cooldown(task)
             session.last_active_at = iso()
             if session.proc_state != ProcState.dead:
                 session.proc_state = ProcState.ready if adapter.resident else ProcState.idle_unloaded

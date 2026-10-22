@@ -257,3 +257,20 @@ async def test_killed_stdio_client_does_not_cancel_daemon_task(daemon, tmp_path,
         if proc.returncode is None:
             proc.kill()
             await proc.wait()
+
+
+async def test_usage_limits_shared_across_connections_but_nested_cannot_write(daemon, tmp_path):
+    a = DaemonClient(daemon.socket, 'limit-owner')
+    b = DaemonClient(daemon.socket, 'other-owner')
+    nested = DaemonClient(daemon.socket, 'nested-owner', nested=True)
+    await a.call('report_usage_limit', agent='fake', reason='monthly_limit')
+    status = await b.call('check_availability', agent='fake')
+    assert status['agents'][0]['status'] == 'blocked'
+    with pytest.raises(RuntimeError, match='retained usage limit'):
+        await b.call('dispatch_task', **dispatch_args(tmp_path))
+    with pytest.raises(RuntimeError, match='nested'):
+        await nested.call('clear_usage_limit', agent='fake')
+    status = await nested.call('check_availability', agent='fake')
+    assert status['coordinator']['dispatch_enabled'] is False
+    await b.call('clear_usage_limit', agent='fake')
+    assert not daemon.registry._usage_limits.active('fake', None)

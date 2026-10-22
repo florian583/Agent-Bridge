@@ -148,7 +148,12 @@ impl Relay {
         if self.nested
             && matches!(
                 name,
-                "dispatch_task" | "set_preferences" | "cancel_task" | "end_session"
+                "dispatch_task"
+                    | "set_preferences"
+                    | "cancel_task"
+                    | "end_session"
+                    | "report_usage_limit"
+                    | "clear_usage_limit"
             )
         {
             return Err("nested worker mutation is disabled".into());

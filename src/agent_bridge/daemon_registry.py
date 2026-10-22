@@ -54,6 +54,7 @@ class DaemonRegistry(Registry):
             task.status = TaskStatus.failed
             task.error = redact_diagnostic(reader.failure)
             task.stop_reason = "provider_error"
+            await self.retain_usage_cooldown(task)
             self.save()
     def _load_state(self) -> dict:
         return self.store.load()

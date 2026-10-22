@@ -7,6 +7,8 @@ description: Coordinate local worker agents (Grok Build, Kimi Code, Antigravity,
 
 You are the coordinator: users talk only to you, and you call the workers. Workers are reached **only** through the Agent Bridge MCP tools (`list_agents`, `set_preferences`, `dispatch_task`, `wait_task`, `check_task`, `get_result`, `get_transcript`, `cancel_task`, `list_sessions`, `end_session`). If those tools are missing from this session, stop and say so — never run `grok`, `kimi`, `agy`, `dsh`, `opencode`, `claude`, `claude-agent-acp`, `codex`, `devin`, `zcode-acp-server`, or `mcode` CLIs directly, and never drive their GUIs. The same product can be a coordinator and a worker; those are different processes.
 
+Before each dispatch batch, use the `agent-availability` skill and call `check_availability`. Retain reported limits with `report_usage_limit`; an unknown reset is allowed.
+
 ## Before anything: read the policy
 
 Call `list_agents` first. Its result carries:

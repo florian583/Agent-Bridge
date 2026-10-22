@@ -44,6 +44,7 @@ async def lifespan(_server: MCPServer[Registry | DaemonClient]) -> AsyncIterator
 # Injected into the coordinator's context at the MCP handshake — the one
 # channel that needs no copied rules file and no skill install.
 INSTRUCTIONS = (
+    "Before dispatch call check_availability for the engine/model. Use report_usage_limit to retain user/provider limits with a timezone-qualified reset, or omit resets_at when unknown. Clear only after recovery. "
     "Agent Bridge dispatches tasks to local worker CLIs (Grok, Kimi Code, "
     "Antigravity, DeepSeek Harness, OpenCode, Claude Code, Codex CLI, Devin CLI, "
     "Cursor, ZCode, MiniMax Code) and keeps their "
@@ -120,6 +121,35 @@ async def list_agents(ctx: Context) -> dict[str, Any]:
             "env": await _call(ctx, "env_status"),
             "coordinator": await _call(ctx, "coordinator_status"),
         }
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(annotations=READ_ONLY)
+async def check_availability(ctx: Context, agent: str | None = None, model: str | None = None) -> dict[str, Any]:
+    """Check limits and capacity before dispatch without starting model work or version probes. Optional agent/model narrows the check. ready means no known block, not guaranteed quota. unknown means unsupported or stale quota, not exhausted. blocked includes retained operator limits and provider quota. Follow coordinator preferences among usable engines; inspect limits.resets_at before retrying. Expired limits trigger a quota refresh, never an assumption of restored capacity."""
+    try:
+        return {"ok": True, **await _call(ctx, "check_availability", agent=agent, model=model)}
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool()
+async def report_usage_limit(ctx: Context, agent: str, reason: str, resets_at: str | None = None,
+                             model: str | None = None) -> dict[str, Any]:
+    """Retain an observed or user-reported usage block for one configured engine, optionally one exact model. reason is monthly_limit, usage_limit, rate_limit or operator_hold. resets_at is an ISO date with timezone within 366 days. Omit it only when the reset is unknown: the block then requires explicit clear. Do not infer a monthly reset date or record ordinary task errors as limits. Shared across coordinator connections; blocks new dispatch, never cancels active work."""
+    try:
+        return {"ok": True, **await _call(ctx, "report_usage_limit", agent=agent, reason=reason,
+                                        resets_at=resets_at, model=model)}
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool()
+async def clear_usage_limit(ctx: Context, agent: str, model: str | None = None) -> dict[str, Any]:
+    """Clear one retained engine/model block after verified recovery or user correction. Does not override provider quota or clear other model/account blocks. Refresh check_availability before dispatch."""
+    try:
+        return {"ok": True, **await _call(ctx, "clear_usage_limit", agent=agent, model=model)}
     except Exception as exc:
         return _error(exc)
 

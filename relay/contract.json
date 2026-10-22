@@ -1,5 +1,5 @@
 {
-  "instructions": "Agent Bridge dispatches tasks to local worker CLIs (Grok, Kimi Code, Antigravity, DeepSeek Harness, OpenCode, Claude Code, Codex CLI, Devin CLI, Cursor, ZCode, MiniMax Code) and keeps their sessions resumable.\nHard rules: workers are reached only through these tools — never drive the worker CLIs or GUIs directly. dispatch_task.cwd is this conversation's project folder (absolute), not the Agent Bridge install path. A wait_task timeout is not failure; call it again. Verify results with get_result plus your own git diff — do not trust a worker's self-report. An empty Kimi result with non-empty warnings is a failed turn, not a no-op.\nCall list_agents first. Read coordinator.mode, coordinator.instructions, coordinator.runtime_context, and coordinator.dispatch_enabled. User preferences in instructions override default worker routing. Each agents[] row carries quota: status ok/exhausted/unknown, rolling windows with remaining_percent and resets_at, and optional provider-reported balance for workers. Custom API/auth endpoints are unsupported; cached readings expire at window reset. unknown means Bridge could not read it, not that it is empty; an exhausted worker will most likely fail its turn. Quota is information for you and the user, not a routing rule — instructions still decide. Claude quota.status covers only shared 5h/weekly limits. Before dispatch, check the requested model's weekly:opus or weekly:sonnet window even when status is ok. A zero remaining_percent means that model is exhausted: report its reset time or use an alternative allowed by the user's routing instructions. Missing or null readings mean unknown; model-specific windows alone cannot establish the shared status. If dispatch_enabled is false, this Bridge was inherited inside a worker process — do not call dispatch_task, set_preferences, cancel_task, or end_session. When dispatch_enabled is true and the user states a lasting preference, persist it with set_preferences. In shared-daemon mode, dispatch requires a UUID request_id on the FIRST call; reuse that ID and identical arguments if a response is lost. Requests are scoped to the real host conversation, not its directory. Missing session binding is an integration error: do not invent a conversation ID or bypass it. Client disconnects leave daemon-owned work running; use cancel_task explicitly. Use inspect_task while a worker runs to see bounded tool calls, output excerpts, silence, elapsed time and usage. Reuse next_cursor for only newer events. Inspect on demand (normally 15-30s minimum), not tight polling; silence alone does not prove a stall. Channel notifications remain terminal-only.",
+  "instructions": "Before dispatch call check_availability for the engine/model. Use report_usage_limit to retain user/provider limits with a timezone-qualified reset, or omit resets_at when unknown. Clear only after recovery. Agent Bridge dispatches tasks to local worker CLIs (Grok, Kimi Code, Antigravity, DeepSeek Harness, OpenCode, Claude Code, Codex CLI, Devin CLI, Cursor, ZCode, MiniMax Code) and keeps their sessions resumable.\nHard rules: workers are reached only through these tools — never drive the worker CLIs or GUIs directly. dispatch_task.cwd is this conversation's project folder (absolute), not the Agent Bridge install path. A wait_task timeout is not failure; call it again. Verify results with get_result plus your own git diff — do not trust a worker's self-report. An empty Kimi result with non-empty warnings is a failed turn, not a no-op.\nCall list_agents first. Read coordinator.mode, coordinator.instructions, coordinator.runtime_context, and coordinator.dispatch_enabled. User preferences in instructions override default worker routing. Each agents[] row carries quota: status ok/exhausted/unknown, rolling windows with remaining_percent and resets_at, and optional provider-reported balance for workers. Custom API/auth endpoints are unsupported; cached readings expire at window reset. unknown means Bridge could not read it, not that it is empty; an exhausted worker will most likely fail its turn. Quota is information for you and the user, not a routing rule — instructions still decide. Claude quota.status covers only shared 5h/weekly limits. Before dispatch, check the requested model's weekly:opus or weekly:sonnet window even when status is ok. A zero remaining_percent means that model is exhausted: report its reset time or use an alternative allowed by the user's routing instructions. Missing or null readings mean unknown; model-specific windows alone cannot establish the shared status. If dispatch_enabled is false, this Bridge was inherited inside a worker process — do not call dispatch_task, set_preferences, cancel_task, or end_session. When dispatch_enabled is true and the user states a lasting preference, persist it with set_preferences. In shared-daemon mode, dispatch requires a UUID request_id on the FIRST call; reuse that ID and identical arguments if a response is lost. Requests are scoped to the real host conversation, not its directory. Missing session binding is an integration error: do not invent a conversation ID or bypass it. Client disconnects leave daemon-owned work running; use cancel_task explicitly. Use inspect_task while a worker runs to see bounded tool calls, output excerpts, silence, elapsed time and usage. Reuse next_cursor for only newer events. Inspect on demand (normally 15-30s minimum), not tight polling; silence alone does not prove a stall. Channel notifications remain terminal-only.",
   "tools": [
     {
       "name": "list_agents",
@@ -19,6 +19,136 @@
         "destructiveHint": false,
         "idempotentHint": true,
         "openWorldHint": false
+      }
+    },
+    {
+      "name": "check_availability",
+      "description": "Check limits and capacity before dispatch without starting model work or version probes. Optional agent/model narrows the check. ready means no known block, not guaranteed quota. unknown means unsupported or stale quota, not exhausted. blocked includes retained operator limits and provider quota. Follow coordinator preferences among usable engines; inspect limits.resets_at before retrying. Expired limits trigger a quota refresh, never an assumption of restored capacity.",
+      "inputSchema": {
+        "properties": {
+          "agent": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Agent"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Model"
+          }
+        },
+        "title": "check_availabilityArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "additionalProperties": true,
+        "title": "check_availabilityDictOutput",
+        "type": "object"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "report_usage_limit",
+      "description": "Retain an observed or user-reported usage block for one configured engine, optionally one exact model. reason is monthly_limit, usage_limit, rate_limit or operator_hold. resets_at is an ISO date with timezone within 366 days. Omit it only when the reset is unknown: the block then requires explicit clear. Do not infer a monthly reset date or record ordinary task errors as limits. Shared across coordinator connections; blocks new dispatch, never cancels active work.",
+      "inputSchema": {
+        "properties": {
+          "agent": {
+            "title": "Agent",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "resets_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Resets At"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Model"
+          }
+        },
+        "required": [
+          "agent",
+          "reason"
+        ],
+        "title": "report_usage_limitArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "additionalProperties": true,
+        "title": "report_usage_limitDictOutput",
+        "type": "object"
+      }
+    },
+    {
+      "name": "clear_usage_limit",
+      "description": "Clear one retained engine/model block after verified recovery or user correction. Does not override provider quota or clear other model/account blocks. Refresh check_availability before dispatch.",
+      "inputSchema": {
+        "properties": {
+          "agent": {
+            "title": "Agent",
+            "type": "string"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Model"
+          }
+        },
+        "required": [
+          "agent"
+        ],
+        "title": "clear_usage_limitArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "additionalProperties": true,
+        "title": "clear_usage_limitDictOutput",
+        "type": "object"
       }
     },
     {

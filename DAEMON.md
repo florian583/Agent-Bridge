@@ -68,3 +68,11 @@ For hosts that expose a stable ID, `AGENT_BRIDGE_CONVERSATION_ID` may explicitly
 Do not replace a running release in place. Store a versioned release alongside the old install. Launchd's exit timeout must permit drain, but logout/reboot may still interrupt work.
 
 Validation includes same-directory scope isolation, storage failure before launch, lost response/retry, durable restart keys, killed stdio client, PID-reuse-safe binding, 30 clients/50 tasks, native log replay/rotation, and no-replay Bridge Live delivery.
+
+## Usage availability
+
+`check_availability(agent?, model?)` combines cached provider quota, retained reports and active task capacity. It does not spawn model work or CLI version probes. `report_usage_limit(agent, reason, resets_at?, model?)` records a user/provider report; `clear_usage_limit(agent, model?)` clears that exact scope. Unknown reset dates remain blocked until corrected or cleared. Timestamped reports expire at the stated reset; expiry requires a fresh quota check rather than promising capacity. Model-specific limits require explicit model selection before dispatch. A failed provider turn with a quota error records a five-minute retry cooldown, without shortening an operator's block.
+
+The bounded `usage-limits.json` file under the runtime home is atomic and protected by the existing cross-process file lock. Separate configured engine accounts remain separate. Corrupt state prevents dispatch instead of silently ignoring known blocks. Accepted work continues. Nested worker clients can read availability but cannot alter limits. Ranking remains in the user-level Claude Hybrid `agent-availability` skill and respects coordinator preferences.
+
+Bridge Live forwards the same three methods through `integrations/bridge-live/availability-client.mjs`. Its installer adds them to the existing user-level relay without replacing notification logic. New tools appear after MCP reconnect. Availability calls have bounded frames and deadlines and never replay writes.
